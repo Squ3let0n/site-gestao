@@ -7,6 +7,7 @@ import PyPDF2
 import re
 from fpdf import FPDF 
 
+
 # Cria as pastas físicas para salvar os arquivos
 PASTA_NOTAS = 'cofre_notas'
 PASTA_EXTRATOS = 'cofre_extratos'
