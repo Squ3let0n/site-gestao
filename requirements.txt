@@ -1,3 +1,4 @@
-pandas
 streamlit
+pandas
 PyPDF2
+fpdf2
