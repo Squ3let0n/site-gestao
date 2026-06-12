@@ -116,7 +116,12 @@ def gerar_relatorio_pdf(mes, ganho_txt, gasto_txt, lucro_txt, df_notas, df_gasto
     else:
         pdf.cell(0, 8, "  - Nenhum gasto PF classificado neste mes.", ln=True)
         
-    return pdf.output(dest='S').encode('latin-1')
+    # Compatibilidade com versões novas e antigas do fpdf2:
+    # algumas versões retornam string e outras retornam bytearray/bytes.
+    pdf_data = pdf.output(dest="S")
+    if isinstance(pdf_data, str):
+        return pdf_data.encode("latin-1")
+    return bytes(pdf_data)
 
 # --- BANCO DE DADOS ---
 def init_db():
