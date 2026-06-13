@@ -35,6 +35,17 @@ def formatar_brl(valor):
     except:
         return "R$ 0,00"
 
+# --- DOCUMENTOS QUE ENTRAM COMO GANHO ---
+def filtrar_documentos_de_ganho(df):
+    """
+    Tudo que não for guia de imposto entra como ganho.
+    Assim, Nota Fiscal de Lucro e Comprovante Genérico somam no Mercado Livre,
+    nas comissões, no balanço geral, no dashboard do mês e no histórico.
+    """
+    if df.empty or 'tipo' not in df.columns:
+        return df
+    return df[df['tipo'].fillna('').str.strip() != "Guia de Imposto (DAS/DARF)"]
+
 # --- FUNÇÃO PARA GARANTIR VALOR ORIGINAL + VALOR CONSIDERADO ---
 def normalizar_valor_ajustado(df):
     """Garante que todo lançamento tenha um valor ajustável para a matemática do painel.
@@ -344,9 +355,13 @@ def excluir_nota_db(id_nota, nome_arquivo):
     conn.commit()
     conn.close()
     
-    caminho_arquivo = os.path.join(PASTA_NOTAS, nome_arquivo)
-    if os.path.exists(caminho_arquivo):
-        os.remove(caminho_arquivo)
+    # O PDF é opcional. Quando for lançamento manual, nome_arquivo vem vazio.
+    # Então só tenta apagar se existir um arquivo real dentro da pasta cofre_notas.
+    nome_arquivo = str(nome_arquivo or "").strip()
+    if nome_arquivo:
+        caminho_arquivo = os.path.join(PASTA_NOTAS, nome_arquivo)
+        if os.path.isfile(caminho_arquivo):
+            os.remove(caminho_arquivo)
 
 def excluir_extrato_db(nome_arquivo):
     conn = init_db()
@@ -555,7 +570,7 @@ with st.sidebar:
         soma_notas_global = 0.0
         
         if not df_todas_notas_global.empty:
-            df_notas_lucro_global = df_todas_notas_global[df_todas_notas_global['tipo'] == "Nota Fiscal de Lucro"]
+            df_notas_lucro_global = filtrar_documentos_de_ganho(df_todas_notas_global)
             soma_notas_global = df_notas_lucro_global['valor'].sum()
             
             if not df_notas_lucro_global.empty:
@@ -622,6 +637,7 @@ with st.sidebar:
             st.rerun()
 
 st.title("📊 Painel Automático de Finanças")
+st.caption("✅ Versão corrigida: PDF opcional no cofre + comprovante genérico soma como ganho")
 
 aba_dash, aba_historico, aba_upload, aba_classificar, aba_notas = st.tabs([
     "📈 Dashboard do Mês", "📅 Histórico Anual", "📂 Importar Extratos", "👆 Classificar Gastos", "🧾 Cofre de Notas"
@@ -851,13 +867,22 @@ with aba_notas:
         nota_mes = st.selectbox("Mês de Referência do Arquivo", meses_fixos, index=idx_mes_nota)
         
         if st.button("☁️ Salvar no Cofre"):
-            if nota_arquivo and nota_origem and nota_valor > 0:
-                caminho_salvar = os.path.join(PASTA_NOTAS, nota_arquivo.name)
-                with open(caminho_salvar, "wb") as f:
-                    f.write(nota_arquivo.getbuffer())
+            # PDF opcional: se anexar, salva o arquivo; se não anexar, salva apenas o lançamento manual.
+            if nota_origem.strip() and nota_valor > 0:
+                nome_arquivo_salvo = ""
+
+                if nota_arquivo is not None:
+                    caminho_salvar = os.path.join(PASTA_NOTAS, nota_arquivo.name)
+                    with open(caminho_salvar, "wb") as f:
+                        f.write(nota_arquivo.getbuffer())
+                    nome_arquivo_salvo = nota_arquivo.name
                 
-                salvar_nota_db(nota_mes, nota_tipo, nota_origem, nota_valor, nota_arquivo.name)
-                st.success("Documento salvo com sucesso no cofre!")
+                salvar_nota_db(nota_mes, nota_tipo, nota_origem.strip(), nota_valor, nome_arquivo_salvo)
+
+                if nome_arquivo_salvo:
+                    st.success("Documento salvo com sucesso no cofre!")
+                else:
+                    st.success("Lançamento manual salvo com sucesso, sem PDF anexado!")
                 
                 st.session_state.tipo_auto = "Nota Fiscal de Lucro"
                 st.session_state.origem_auto = ""
@@ -866,7 +891,7 @@ with aba_notas:
                 st.session_state.uploader_key += 1 
                 st.rerun()
             else:
-                st.error("Preencha todos os campos e anexe o arquivo.")
+                st.error("Preencha a empresa/pagador e o valor da nota. O PDF é opcional.")
                 
     with col_lista:
         st.markdown(f"**Documentos Guardados ({mes_selecionado})**")
@@ -889,16 +914,27 @@ with aba_notas:
                 for _, row in df_notas.iterrows():
                     col_dl, col_del = st.columns([4, 1])
                     with col_dl:
-                        caminho_arquivo = os.path.join(PASTA_NOTAS, row['nome_arquivo'])
-                        if os.path.exists(caminho_arquivo):
-                            with open(caminho_arquivo, "rb") as file:
-                                st.download_button(label=f"📥 {row['origem']} ({row['nome_arquivo']})", data=file, file_name=row['nome_arquivo'], mime="application/octet-stream", key=f"dl_{row['id']}")
+                        nome_arquivo_doc = str(row.get('nome_arquivo') or "").strip()
+
+                        if nome_arquivo_doc:
+                            caminho_arquivo = os.path.join(PASTA_NOTAS, nome_arquivo_doc)
+                            if os.path.isfile(caminho_arquivo):
+                                with open(caminho_arquivo, "rb") as file:
+                                    st.download_button(
+                                        label=f"📥 {row['origem']} ({nome_arquivo_doc})",
+                                        data=file,
+                                        file_name=nome_arquivo_doc,
+                                        mime="application/octet-stream",
+                                        key=f"dl_{row['id']}"
+                                    )
+                            else:
+                                st.write(f"⚠️ {row['origem']} (Arquivo não encontrado na pasta)")
                         else:
-                            st.write(f"⚠️ {row['origem']} (Arquivo não encontrado na pasta)")
+                            st.write(f"📝 {row['origem']} (lançamento manual, sem PDF)")
                             
                     with col_del:
                         if st.button("🗑️ Excluir", key=f"del_{row['id']}"):
-                            excluir_nota_db(row['id'], row['nome_arquivo'])
+                            excluir_nota_db(row['id'], row.get('nome_arquivo', ""))
                             st.rerun()
             else:
                 st.info("Nenhuma nota salva para este mês.")
@@ -914,10 +950,10 @@ with aba_dash:
     soma_notas_pj = 0.0
     
     if not df_todas_notas.empty and mes_selecionado != "Todos":
-        df_notas_pj = df_todas_notas[(df_todas_notas['mes_ano'] == mes_selecionado) & (df_todas_notas['tipo'] == "Nota Fiscal de Lucro")]
+        df_notas_pj = filtrar_documentos_de_ganho(df_todas_notas[df_todas_notas['mes_ano'] == mes_selecionado])
         soma_notas_pj = df_notas_pj['valor'].sum()
     elif not df_todas_notas.empty and mes_selecionado == "Todos":
-        df_notas_pj = df_todas_notas[df_todas_notas['tipo'] == "Nota Fiscal de Lucro"]
+        df_notas_pj = filtrar_documentos_de_ganho(df_todas_notas)
         soma_notas_pj = df_notas_pj['valor'].sum()
 
     if df_mes_atual.empty and df_notas_pj.empty:
@@ -1042,7 +1078,7 @@ with aba_historico:
             
             soma_notas = 0.0
             if not df_todas_notas_hist.empty:
-                notas_mes = df_todas_notas_hist[(df_todas_notas_hist['mes_ano'] == mes) & (df_todas_notas_hist['tipo'] == "Nota Fiscal de Lucro")]
+                notas_mes = filtrar_documentos_de_ganho(df_todas_notas_hist[df_todas_notas_hist['mes_ano'] == mes])
                 soma_notas = notas_mes['valor'].sum()
                 
             e_pf = df_pf[(df_pf['valor_ajustado'] > 0) & (df_pf['descricao'].str.contains(palavra_salario_input, case=False, na=False))]['valor_ajustado'].sum() if not df_pf.empty else 0.0
