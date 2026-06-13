@@ -5,6 +5,7 @@ import os
 from datetime import datetime
 import PyPDF2
 import re
+import unicodedata
 from fpdf import FPDF 
 
 # Cria as pastas físicas para salvar os arquivos
@@ -36,15 +37,77 @@ def formatar_brl(valor):
         return "R$ 0,00"
 
 # --- DOCUMENTOS QUE ENTRAM COMO GANHO ---
+def normalizar_texto_chave(texto):
+    """Cria uma chave simples para comparar nomes ignorando acentos, maiúsculas e espaços extras."""
+    texto = str(texto or "").strip()
+    texto = " ".join(texto.split())
+    texto = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode("ascii")
+    return texto.lower()
+
+
+def normalizar_nome_plataforma(origem):
+    """
+    Padroniza o nome da plataforma para que lançamentos manuais somem junto
+    com os nomes que já aparecem no BALANÇO GERAL.
+    Ex.: Mercado Livre, mercado livre, MERCADO LIVRE e Mercado Pago ficam no mesmo grupo.
+    """
+    origem_limpa = " ".join(str(origem or "").strip().split())
+    chave = normalizar_texto_chave(origem_limpa)
+
+    if not origem_limpa:
+        return "Sem identificação"
+
+    aliases = [
+        (["mercado livre", "mercado pago", "mercadolivre", "mercadopago", "ebazar", "mercado livre/pago"], "Mercado Livre"),
+        (["shopee", "shps"], "Shopee (SHPS Tecnologia)"),
+        (["amazon"], "Amazon"),
+        (["awin"], "AWIN"),
+        (["cssbuy", "css buy"], "CSSBuy"),
+        (["aliexpress", "ali express", "alibaba"], "Aliexpress"),
+        (["google llc"], "Google LLC"),
+        (["google"], "Google"),
+        (["magazine", "magalu"], "Magazine"),
+        (["terabyte", "terabyte shop"], "Terabyte"),
+    ]
+
+    for termos, nome_padrao in aliases:
+        if any(termo in chave for termo in termos):
+            return nome_padrao
+
+    return origem_limpa
+
+
 def filtrar_documentos_de_ganho(df):
     """
     Tudo que não for guia de imposto entra como ganho.
-    Assim, Nota Fiscal de Lucro e Comprovante Genérico somam no Mercado Livre,
-    nas comissões, no balanço geral, no dashboard do mês e no histórico.
+    Também padroniza o nome da plataforma para somar manual + nota no mesmo grupo.
     """
     if df.empty or 'tipo' not in df.columns:
         return df
-    return df[df['tipo'].fillna('').str.strip() != "Guia de Imposto (DAS/DARF)"]
+
+    df_ganho = df[df['tipo'].fillna('').str.strip() != "Guia de Imposto (DAS/DARF)"].copy()
+
+    if 'origem' in df_ganho.columns:
+        df_ganho['origem'] = df_ganho['origem'].apply(normalizar_nome_plataforma)
+
+    df_ganho['valor'] = pd.to_numeric(df_ganho['valor'], errors='coerce').fillna(0.0)
+    return df_ganho
+
+
+def agrupar_ganhos_por_plataforma(df):
+    """Agrupa ganhos por plataforma já com nome normalizado."""
+    if df.empty or 'origem' not in df.columns or 'valor' not in df.columns:
+        return pd.DataFrame(columns=['origem', 'valor'])
+
+    df_tmp = df.copy()
+    df_tmp['origem'] = df_tmp['origem'].apply(normalizar_nome_plataforma)
+    df_tmp['valor'] = pd.to_numeric(df_tmp['valor'], errors='coerce').fillna(0.0)
+
+    return (
+        df_tmp.groupby('origem', as_index=False)['valor']
+        .sum()
+        .sort_values('origem')
+    )
 
 # --- FUNÇÃO PARA GARANTIR VALOR ORIGINAL + VALOR CONSIDERADO ---
 def normalizar_valor_ajustado(df):
@@ -575,9 +638,9 @@ with st.sidebar:
             
             if not df_notas_lucro_global.empty:
                 st.markdown("**Ganhos por Plataforma:**")
-                agrupado_plataformas = df_notas_lucro_global.groupby('origem')['valor'].sum()
-                for origem, valor in agrupado_plataformas.items():
-                    st.write(f"• {origem}: {formatar_brl(valor)}")
+                agrupado_plataformas = agrupar_ganhos_por_plataforma(df_notas_lucro_global)
+                for _, row_plataforma in agrupado_plataformas.iterrows():
+                    st.write(f"• {row_plataforma['origem']}: {formatar_brl(row_plataforma['valor'])}")
         
         df_pf_global = df_mestre[df_mestre['tipo_conta'] == "PF (Pessoal)"]
         salario_global = df_pf_global[(df_pf_global['valor_ajustado'] > 0) & (df_pf_global['descricao'].str.contains(palavra_salario_input, case=False, na=False))]['valor_ajustado'].sum()
@@ -637,6 +700,7 @@ with st.sidebar:
             st.rerun()
 
 st.title("📊 Painel Automático de Finanças")
+st.caption("✅ Versão corrigida: nomes avulsos somam na mesma plataforma do BALANÇO GERAL")
 st.caption("✅ Versão corrigida: PDF opcional no cofre + comprovante genérico soma como ganho")
 
 aba_dash, aba_historico, aba_upload, aba_classificar, aba_notas = st.tabs([
@@ -1036,9 +1100,9 @@ with aba_dash:
             
             st.markdown("👇 **Origem dos Ganhos (Baseado nas Notas)**")
             if not df_notas_pj.empty:
-                df_display_pj = df_notas_pj[['origem', 'valor']].copy()
+                df_display_pj = agrupar_ganhos_por_plataforma(df_notas_pj)
                 df_display_pj['valor'] = df_display_pj['valor'].apply(formatar_brl)
-                st.dataframe(df_display_pj, hide_index=True, column_config={"origem": "Empresa / CNPJ", "valor": "Valor Recebido"}, use_container_width=True)
+                st.dataframe(df_display_pj, hide_index=True, column_config={"origem": "Empresa / Plataforma", "valor": "Valor Recebido"}, use_container_width=True)
             else:
                 st.write("Nenhuma nota de lucro anexada neste mês.")
             
